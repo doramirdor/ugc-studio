@@ -1,0 +1,127 @@
+/* ============================================================
+   Design tokens — derived from impeccable.style principles:
+   restraint, hierarchy, generous whitespace, no purple gradients.
+   Single accent, monospace for IDs/codes, near-black primary.
+   ============================================================ */
+
+:root {
+  /* Type — Inter for UI, Geist Mono for code. System fallbacks first
+     so we don't FOUT on slow networks or block on Google Fonts. */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: ui-monospace, 'Geist Mono', 'JetBrains Mono', 'SF Mono', Menlo, monospace;
+  --font-display: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+
+  /* Type scale — 11/12/13/14/16/20/28. The deliberate skip from 16 → 20 → 28
+     gives display a real voice instead of "slightly bigger body text". */
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-base: 13px;
+  --fs-md: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 20px;
+  --fs-2xl: 28px;
+
+  /* Color — neutrals + ONE accent. The accent is intentionally
+     not a purple. Status colors are slightly desaturated from
+     Tailwind defaults so they read calmer. */
+  --bg: #fafafa;
+  --surface: #ffffff;
+  --surface-2: #f5f5f5;
+  --surface-3: #ededed;
+
+  --border: #e5e5e5;
+  --border-strong: #d4d4d4;
+
+  --text: #0a0a0a;
+  --text-2: #525252;
+  --text-3: #a3a3a3;
+
+  --accent: #18181b;
+  --accent-soft: #18181b14;
+
+  --status-idle: #a3a3a3;
+  --status-running: #2563eb;
+  --status-running-soft: #2563eb1f;
+  --status-done: #16a34a;
+  --status-done-soft: #16a34a1f;
+  --status-error: #dc2626;
+  --status-error-soft: #dc26261f;
+
+  /* Radii + shadows — flatter, more deliberate. */
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 12px;
+
+  --shadow-sm: 0 1px 2px rgba(10, 10, 10, 0.04);
+  --shadow-md: 0 1px 2px rgba(10, 10, 10, 0.04), 0 4px 12px rgba(10, 10, 10, 0.04);
+  --shadow-lg: 0 1px 3px rgba(10, 10, 10, 0.05), 0 8px 24px rgba(10, 10, 10, 0.06);
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  font-family: var(--font-sans);
+  font-feature-settings: 'cv11', 'ss01', 'ss03';
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button { font-family: inherit; }
+input, textarea, select { font-family: inherit; outline: none; }
+input:focus, textarea:focus, select:focus { border-color: var(--accent); }
+
+code, kbd, samp {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  font-feature-settings: 'liga' 0, 'calt' 0;
+}
+
+/* React Flow surface refinements. The default handle style is a hard
+   purple dot — neutral it down so the canvas reads as one surface, not
+   a series of branded dots. */
+.react-flow__node { font-family: inherit; }
+.react-flow__handle {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 2px solid var(--surface);
+  background: var(--text-3);
+  transition: background 0.12s ease;
+}
+.react-flow__handle:hover { background: var(--text); }
+.react-flow__edge-path { stroke: var(--text-3); }
+.react-flow__edge.animated path {
+  stroke: var(--text-3);
+  stroke-dasharray: 5;
+  animation: dashdraw 0.8s linear infinite;
+}
+.react-flow__edge.selected path,
+.react-flow__edge:focus path { stroke: var(--accent); }
+@keyframes dashdraw { to { stroke-dashoffset: -10; } }
+
+/* MiniMap + Controls — strip the gradient/heavy chrome React Flow
+   ships with by default. */
+.react-flow__minimap {
+  background: var(--surface) !important;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.react-flow__controls {
+  border-radius: var(--r-md);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+}
+.react-flow__controls-button {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-2);
+}
+.react-flow__controls-button:hover { background: var(--surface-2); }
+.react-flow__attribution { display: none; }

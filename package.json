@@ -1,0 +1,55 @@
+{
+  "name": "ugc-studio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Visual node-graph editor that turns PostHog sessions into stitched MP4 ads. PostHog → script → scenes → render → concat → final MP4, with HeyGen avatars, page recordings, and manual asset/merge nodes.",
+  "license": "MIT",
+  "author": "Dor Amir <amirdor@gmail.com>",
+  "homepage": "https://github.com/doramirdor/ugc-studio#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/doramirdor/ugc-studio.git"
+  },
+  "bugs": {
+    "url": "https://github.com/doramirdor/ugc-studio/issues"
+  },
+  "keywords": [
+    "posthog",
+    "heygen",
+    "ffmpeg",
+    "node-graph",
+    "react-flow",
+    "ad-generation",
+    "ugc",
+    "video-pipeline",
+    "claude"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "concurrently -n web,api -c blue,green \"vite\" \"node --watch server/server.mjs\"",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "server": "node --watch server/server.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@xyflow/react": "^12.3.6",
+    "express": "^4.21.0",
+    "framer-motion": "^11.13.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.0",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7"
+  }
+}
