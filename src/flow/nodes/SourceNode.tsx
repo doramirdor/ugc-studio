@@ -5,7 +5,7 @@ import { useGraph, type SourceData, type ScriptData } from '../../store';
 import { apiPullSessions } from '../../api/client';
 
 export function SourceNode({ id, data }: { id: string; data: SourceData }) {
-  const { setNodes, setEdges, patchNode } = useGraph();
+  const { setNodes, setEdges, patchNode, pruneNode } = useGraph();
   const [since, setSince] = useState(data.since);
 
   const pull = async () => {
@@ -46,7 +46,13 @@ export function SourceNode({ id, data }: { id: string; data: SourceData }) {
   };
 
   return (
-    <NodeShell title="PostHog" subtitle="Pull recent sessions" status={data.status} showTargetHandle={false}>
+    <NodeShell
+      title="PostHog"
+      subtitle="Pull recent sessions"
+      status={data.status}
+      showTargetHandle={false}
+      onDelete={() => pruneNode(id)}
+    >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div>
           <FieldLabel>Time window</FieldLabel>

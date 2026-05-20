@@ -203,20 +203,30 @@ interface State {
 }
 
 // Layout: nodes flow LEFT to RIGHT, growing as a tree. The graph starts with
-// only the root (PostHog Source). Each stage spawns the next node when its
-// own action completes. Camera auto-fits as the tree grows so the new leaf
-// is always visible.
+// TWO root seeds the user can pick between — the PostHog video pipeline and
+// the URL → social post pipeline. Either can be deleted (Reset brings both
+// back). Other root nodes (Assets, additional URL sources) come from the
+// palette.
 const initialNodes: Node[] = [
   {
     id: 'source',
     type: 'sourceNode',
-    position: { x: 60, y: 200 },
+    position: { x: 60, y: 120 },
     data: {
       status: 'idle',
       since: '7d',
       sessionsCount: undefined,
       journeys: undefined,
     } satisfies SourceData,
+  },
+  {
+    id: 'url-source',
+    type: 'urlSourceNode',
+    position: { x: 60, y: 540 },
+    data: {
+      status: 'idle',
+      url: '',
+    } satisfies UrlSourceData,
   },
 ];
 
@@ -276,7 +286,6 @@ export const useGraph = create<State>()(
         })),
       pruneNode: (id) =>
         set((state) => {
-          if (id === 'source') return state; // source is the seed; never auto-removable
           const { nodeIds, edgeIds } = computeCascade([id], state.nodes, state.edges);
           if (nodeIds.size === 0) return state;
           return {
@@ -287,7 +296,7 @@ export const useGraph = create<State>()(
         }),
       markTombstones: (ids) =>
         set((state) => ({
-          tombstones: Array.from(new Set([...state.tombstones, ...ids.filter((i) => i !== 'source')])),
+          tombstones: Array.from(new Set([...state.tombstones, ...ids])),
         })),
       setTombstones: (updater) =>
         set((state) => ({ tombstones: updater(state.tombstones) })),

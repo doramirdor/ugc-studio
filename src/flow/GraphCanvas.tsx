@@ -100,12 +100,12 @@ function GraphCanvasInner() {
   // Backspace path: when the user selects nodes and presses Delete,
   // xyflow calls onBeforeDelete first. We expand the deletion list with
   // the orphan-cascade so deleting a Scene also takes its Output (and
-  // Concat, if that was the last scene). Source is filtered out — the
-  // seed node can't be deleted. onNodesDelete then marks tombstones so
-  // ConcatSpawner doesn't immediately resurrect the deleted leaves.
+  // Concat, if that was the last scene). Both seed nodes (PostHog source
+  // and URL source) are now deletable — Reset restores them. onNodesDelete
+  // marks tombstones so ConcatSpawner doesn't resurrect the deleted leaves.
   const onBeforeDelete = useCallback(
     async ({ nodes: toDelete }: { nodes: Node[]; edges: Edge[] }) => {
-      const idsToDelete = new Set(toDelete.filter((n) => n.id !== 'source').map((n) => n.id));
+      const idsToDelete = new Set(toDelete.map((n) => n.id));
       if (idsToDelete.size === 0) return false;
 
       // Iteratively orphan-expand using current graph state.
