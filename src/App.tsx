@@ -115,7 +115,7 @@ export default function App() {
               letterSpacing: 0.2,
             }}
           >
-            posthog · script · scenes · merge
+            posthog · script · scenes · merge · social
           </div>
         </div>
         <div style={{ display: 'flex', gap: 4 }}>

@@ -114,7 +114,65 @@ export interface ConcatData {
   error?: string;
 }
 
-export type AppNodeData = SourceData | ScriptData | SceneData | OutputData | ConcatData | AssetData | MergeData;
+// Social post generator: a parallel root for the URL → analysis → posts flow.
+// UrlSourceData lives on the entry node (palette-spawned), holds the URL the
+// user typed and the analysis Claude returned. On success it spawns one
+// SocialPostsNode, which owns the per-platform draft cards.
+export type SocialPlatform = 'linkedin' | 'twitter' | 'facebook';
+
+export interface UrlAnalysis {
+  brand: string;
+  audience: string;
+  tone: string;
+  summary: string;
+  valueProps: string[];
+  callToAction?: string;
+}
+
+export interface UrlSourceData {
+  status: NodeStatus;
+  url: string;
+  finalUrl?: string;
+  analysis?: UrlAnalysis;
+  mode?: 'llm-api' | 'llm-cli' | 'template';
+  error?: string;
+}
+
+export interface SocialPost {
+  id: string;
+  platform: SocialPlatform;
+  text: string;
+  headline: string;
+  hashtags: string[];
+  imageUrl?: string;
+  // UI state — toggled by the user before final publish/export.
+  publish?: boolean;
+  // Per-card status for the refine action so spinners are scoped.
+  refining?: boolean;
+  refineError?: string;
+}
+
+export interface SocialPostsData {
+  status: NodeStatus;
+  url: string;
+  analysis: UrlAnalysis;
+  platforms: SocialPlatform[];
+  extraInstructions?: string;
+  posts: SocialPost[];
+  mode?: 'llm-api' | 'llm-cli' | 'template';
+  error?: string;
+}
+
+export type AppNodeData =
+  | SourceData
+  | ScriptData
+  | SceneData
+  | OutputData
+  | ConcatData
+  | AssetData
+  | MergeData
+  | UrlSourceData
+  | SocialPostsData;
 
 type NodesUpdater = Node[] | ((prev: Node[]) => Node[]);
 type EdgesUpdater = Edge[] | ((prev: Edge[]) => Edge[]);
@@ -145,20 +203,30 @@ interface State {
 }
 
 // Layout: nodes flow LEFT to RIGHT, growing as a tree. The graph starts with
-// only the root (PostHog Source). Each stage spawns the next node when its
-// own action completes. Camera auto-fits as the tree grows so the new leaf
-// is always visible.
+// TWO root seeds the user can pick between — the PostHog video pipeline and
+// the URL → social post pipeline. Either can be deleted (Reset brings both
+// back). Other root nodes (Assets, additional URL sources) come from the
+// palette.
 const initialNodes: Node[] = [
   {
     id: 'source',
     type: 'sourceNode',
-    position: { x: 60, y: 200 },
+    position: { x: 60, y: 120 },
     data: {
       status: 'idle',
       since: '7d',
       sessionsCount: undefined,
       journeys: undefined,
     } satisfies SourceData,
+  },
+  {
+    id: 'url-source',
+    type: 'urlSourceNode',
+    position: { x: 60, y: 540 },
+    data: {
+      status: 'idle',
+      url: '',
+    } satisfies UrlSourceData,
   },
 ];
 
@@ -218,7 +286,6 @@ export const useGraph = create<State>()(
         })),
       pruneNode: (id) =>
         set((state) => {
-          if (id === 'source') return state; // source is the seed; never auto-removable
           const { nodeIds, edgeIds } = computeCascade([id], state.nodes, state.edges);
           if (nodeIds.size === 0) return state;
           return {
@@ -229,7 +296,7 @@ export const useGraph = create<State>()(
         }),
       markTombstones: (ids) =>
         set((state) => ({
-          tombstones: Array.from(new Set([...state.tombstones, ...ids.filter((i) => i !== 'source')])),
+          tombstones: Array.from(new Set([...state.tombstones, ...ids])),
         })),
       setTombstones: (updater) =>
         set((state) => ({ tombstones: updater(state.tombstones) })),
@@ -251,7 +318,7 @@ export const useGraph = create<State>()(
           return n;
         });
       },
-      version: 5,
+      version: 6,
       // v1 -> v2: added optional fields on ScriptData and SceneData (no-op).
       // v2 -> v3: render output split into its own leaf node; legacy
       //   scene→concat edges stripped to avoid cross-wiring with the
@@ -261,6 +328,8 @@ export const useGraph = create<State>()(
       //   the migration is a pure no-op for existing merge nodes.
       // v4 -> v5: added tombstones[] for cascade-delete bookkeeping.
       //   Default to empty array on existing graphs.
+      // v5 -> v6: added UrlSource and SocialPosts node types. Pure
+      //   additive (new node ids, no shape change to existing nodes).
       migrate: (state, version) => {
         const s = state as State;
         if (!s) return s;

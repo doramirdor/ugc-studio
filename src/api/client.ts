@@ -115,6 +115,53 @@ export interface HeyGenVoice {
   previewAudio: string | null;
 }
 
+// =========================================================================
+// Social post generator — analyze a URL, draft posts per platform, refine.
+// =========================================================================
+export type SocialPlatform = 'linkedin' | 'twitter' | 'facebook';
+
+export interface UrlAnalysis {
+  brand: string;
+  audience: string;
+  tone: string;
+  summary: string;
+  valueProps: string[];
+  callToAction?: string;
+}
+
+export interface SocialPost {
+  id: string;
+  platform: SocialPlatform;
+  text: string;
+  headline: string;
+  hashtags: string[];
+  imageUrl?: string;
+}
+
+export const apiAnalyzeUrl = (url: string) =>
+  api<{ url: string; analysis: UrlAnalysis; mode?: ScriptMode; model?: string }>(
+    '/analyze-url',
+    { url },
+  );
+
+export const apiGeneratePosts = (input: {
+  url: string;
+  analysis: UrlAnalysis;
+  platforms: SocialPlatform[];
+  extraInstructions?: string;
+}) =>
+  api<{ posts: SocialPost[]; mode?: ScriptMode; model?: string; analysis: UrlAnalysis }>(
+    '/generate-posts',
+    input,
+  );
+
+export const apiRefinePost = (input: {
+  analysis: UrlAnalysis;
+  post: SocialPost;
+  instructions: string;
+}) =>
+  api<{ post: SocialPost; mode?: ScriptMode; model?: string }>('/refine-post', input);
+
 let avatarsPromise: Promise<HeyGenAvatar[]> | null = null;
 let voicesPromise: Promise<HeyGenVoice[]> | null = null;
 

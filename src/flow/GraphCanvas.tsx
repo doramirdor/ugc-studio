@@ -18,7 +18,13 @@ import {
   applyNodeChanges,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { useGraph, type AssetData, type MergeData, type SceneData } from '../store';
+import {
+  useGraph,
+  type AssetData,
+  type MergeData,
+  type SceneData,
+  type UrlSourceData,
+} from '../store';
 import { Palette, type PaletteKind } from './Palette';
 import { SourceNode } from './nodes/SourceNode';
 import { ScriptNode } from './nodes/ScriptNode';
@@ -27,6 +33,8 @@ import { OutputNode } from './nodes/OutputNode';
 import { ConcatNode } from './nodes/ConcatNode';
 import { AssetNode } from './nodes/AssetNode';
 import { MergeNode } from './nodes/MergeNode';
+import { UrlSourceNode } from './nodes/UrlSourceNode';
+import { SocialPostsNode } from './nodes/SocialPostsNode';
 
 const nodeTypes = {
   sourceNode: SourceNode,
@@ -36,6 +44,8 @@ const nodeTypes = {
   concatNode: ConcatNode,
   assetNode: AssetNode,
   mergeNode: MergeNode,
+  urlSourceNode: UrlSourceNode,
+  socialPostsNode: SocialPostsNode,
 };
 
 function GraphCanvasInner() {
@@ -90,12 +100,12 @@ function GraphCanvasInner() {
   // Backspace path: when the user selects nodes and presses Delete,
   // xyflow calls onBeforeDelete first. We expand the deletion list with
   // the orphan-cascade so deleting a Scene also takes its Output (and
-  // Concat, if that was the last scene). Source is filtered out — the
-  // seed node can't be deleted. onNodesDelete then marks tombstones so
-  // ConcatSpawner doesn't immediately resurrect the deleted leaves.
+  // Concat, if that was the last scene). Both seed nodes (PostHog source
+  // and URL source) are now deletable — Reset restores them. onNodesDelete
+  // marks tombstones so ConcatSpawner doesn't resurrect the deleted leaves.
   const onBeforeDelete = useCallback(
     async ({ nodes: toDelete }: { nodes: Node[]; edges: Edge[] }) => {
-      const idsToDelete = new Set(toDelete.filter((n) => n.id !== 'source').map((n) => n.id));
+      const idsToDelete = new Set(toDelete.map((n) => n.id));
       if (idsToDelete.size === 0) return false;
 
       // Iteratively orphan-expand using current graph state.
@@ -222,6 +232,13 @@ function GraphCanvasInner() {
           type: 'mergeNode',
           position,
           data: { status: 'idle', mode: 'concat' } satisfies MergeData,
+        };
+      } else if (kind === 'url-source') {
+        newNode = {
+          id: `url-${idSuffix}`,
+          type: 'urlSourceNode',
+          position,
+          data: { status: 'idle', url: '' } satisfies UrlSourceData,
         };
       } else if (kind.startsWith('asset-')) {
         const assetKind = kind.slice('asset-'.length) as AssetData['kind'];
