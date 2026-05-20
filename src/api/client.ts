@@ -145,7 +145,7 @@ export const apiAnalyzeUrl = (url: string) =>
   );
 
 export const apiGeneratePosts = (input: {
-  url: string;
+  url?: string;
   analysis: UrlAnalysis;
   platforms: SocialPlatform[];
   extraInstructions?: string;

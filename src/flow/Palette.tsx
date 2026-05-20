@@ -9,14 +9,18 @@ export type PaletteKind =
   | 'asset-audio'
   | 'asset-video'
   | 'merge'
-  | 'url-source';
+  | 'url-source'
+  | 'manual-post'
+  | 'posthog-source';
 
 const ITEMS: Array<{ kind: PaletteKind; label: string; hint: string }> = [
+  { kind: 'url-source', label: 'Analysis', hint: 'URL → Claude → posts' },
+  { kind: 'manual-post', label: 'Post', hint: 'brand brief → posts' },
+  { kind: 'posthog-source', label: 'Video pipeline', hint: 'PostHog → scenes → MP4' },
   { kind: 'asset-image', label: 'Image', hint: 'png · jpg · webp' },
   { kind: 'asset-audio', label: 'Audio', hint: 'mp3 · m4a · wav' },
   { kind: 'asset-video', label: 'Video', hint: 'mp4 · mov · webm' },
   { kind: 'merge', label: 'Merge', hint: 'stitch wired inputs' },
-  { kind: 'url-source', label: 'URL → Posts', hint: 'analyze + draft social' },
 ];
 
 export function Palette() {
