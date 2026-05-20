@@ -21,8 +21,10 @@ import '@xyflow/react/dist/style.css';
 import {
   useGraph,
   type AssetData,
+  type ManualAnalysisData,
   type MergeData,
   type SceneData,
+  type SourceData,
   type UrlSourceData,
 } from '../store';
 import { Palette, type PaletteKind } from './Palette';
@@ -35,6 +37,8 @@ import { AssetNode } from './nodes/AssetNode';
 import { MergeNode } from './nodes/MergeNode';
 import { UrlSourceNode } from './nodes/UrlSourceNode';
 import { SocialPostsNode } from './nodes/SocialPostsNode';
+import { ManualAnalysisNode } from './nodes/ManualAnalysisNode';
+import { WelcomeCard } from './WelcomeCard';
 
 const nodeTypes = {
   sourceNode: SourceNode,
@@ -46,6 +50,7 @@ const nodeTypes = {
   mergeNode: MergeNode,
   urlSourceNode: UrlSourceNode,
   socialPostsNode: SocialPostsNode,
+  manualAnalysisNode: ManualAnalysisNode,
 };
 
 function GraphCanvasInner() {
@@ -134,6 +139,50 @@ function GraphCanvasInner() {
   const onNodesDelete = useCallback(
     (deleted: Node[]) => markTombstones(deleted.map((n) => n.id)),
     [markTombstones],
+  );
+
+  // Spawn one of the seed-level node kinds at a chosen position. Reused
+  // by the WelcomeCard buttons and the Palette drop handler so both paths
+  // construct the same defaults.
+  const spawnSeed = useCallback(
+    (kind: 'analysis' | 'post' | 'video', position: { x: number; y: number }) => {
+      const idSuffix = Math.random().toString(36).slice(2, 8);
+      let newNode: Node | null = null;
+      if (kind === 'analysis') {
+        newNode = {
+          id: `url-${idSuffix}`,
+          type: 'urlSourceNode',
+          position,
+          data: { status: 'idle', url: '' } satisfies UrlSourceData,
+        };
+      } else if (kind === 'post') {
+        newNode = {
+          id: `manual-${idSuffix}`,
+          type: 'manualAnalysisNode',
+          position,
+          data: {
+            status: 'idle',
+            brand: '',
+            audience: '',
+            tone: '',
+            valueProps: '',
+            callToAction: '',
+          } satisfies ManualAnalysisData,
+        };
+      } else {
+        // PostHog video pipeline seed. Single-instance: id is fixed so
+        // re-spawning doesn't double up.
+        if (nodes.some((n) => n.id === 'source')) return;
+        newNode = {
+          id: 'source',
+          type: 'sourceNode',
+          position,
+          data: { status: 'idle', since: '7d' } satisfies SourceData,
+        };
+      }
+      if (newNode) setNodes((prev) => [...prev, newNode!]);
+    },
+    [nodes, setNodes],
   );
 
   const onConnect = useCallback(
@@ -234,12 +283,14 @@ function GraphCanvasInner() {
           data: { status: 'idle', mode: 'concat' } satisfies MergeData,
         };
       } else if (kind === 'url-source') {
-        newNode = {
-          id: `url-${idSuffix}`,
-          type: 'urlSourceNode',
-          position,
-          data: { status: 'idle', url: '' } satisfies UrlSourceData,
-        };
+        spawnSeed('analysis', position);
+        return;
+      } else if (kind === 'manual-post') {
+        spawnSeed('post', position);
+        return;
+      } else if (kind === 'posthog-source') {
+        spawnSeed('video', position);
+        return;
       } else if (kind.startsWith('asset-')) {
         const assetKind = kind.slice('asset-'.length) as AssetData['kind'];
         newNode = {
@@ -251,7 +302,7 @@ function GraphCanvasInner() {
       }
       if (newNode) setNodes((prev) => [...prev, newNode!]);
     },
-    [screenToFlowPosition, setNodes],
+    [screenToFlowPosition, setNodes, spawnSeed],
   );
 
   return (
@@ -287,6 +338,18 @@ function GraphCanvasInner() {
         <Panel position="top-left">
           <ArrangeButton onClick={arrange} />
         </Panel>
+        {nodes.length === 0 && (
+          <WelcomeCard
+            onPick={(kind) => {
+              // Drop slightly left-of-center so the spawned node lays out
+              // toward the right where downstream nodes will land.
+              spawnSeed(kind, screenToFlowPosition({
+                x: window.innerWidth / 2 - 240,
+                y: window.innerHeight / 2 - 100,
+              }));
+            }}
+          />
+        )}
       </ReactFlow>
     </div>
   );

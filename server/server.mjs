@@ -1147,7 +1147,7 @@ function buildPostsPrompt({ analysis, platforms, url, extraInstructions }) {
   }).join('\n');
 
   return [
-    `Source URL: ${url}`,
+    url ? `Source URL: ${url}` : 'Source: manual brand brief (no URL provided)',
     '',
     'BRAND ANALYSIS:',
     JSON.stringify(analysis, null, 2),
@@ -1195,12 +1195,13 @@ function sanitizePost(raw, fallbackPlatform) {
 }
 
 app.post('/api/generate-posts', async (req, res) => {
-  let url;
+  let url = '';
   let analysis;
   let platforms;
   let extraInstructions = '';
   try {
-    url = sanitizePostUrl(req.body?.url);
+    // URL is optional — the manual-brand path skips URL analysis entirely.
+    if (req.body?.url) url = sanitizePostUrl(req.body.url);
     analysis = sanitizeAnalysis(req.body?.analysis);
     platforms = sanitizePlatforms(req.body?.platforms);
     if (req.body?.extraInstructions) {

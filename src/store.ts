@@ -138,6 +138,19 @@ export interface UrlSourceData {
   error?: string;
 }
 
+// "Post" path counterpart to UrlSourceNode — the user types the brand
+// brief directly instead of fetching a URL. On submit it spawns the same
+// SocialPostsNode the URL path uses, so the downstream UI is shared.
+export interface ManualAnalysisData {
+  status: NodeStatus;
+  brand: string;
+  audience: string;
+  tone: string;
+  valueProps: string; // newline-separated; split to array on submit
+  callToAction: string;
+  error?: string;
+}
+
 export interface SocialPost {
   id: string;
   platform: SocialPlatform;
@@ -172,7 +185,8 @@ export type AppNodeData =
   | AssetData
   | MergeData
   | UrlSourceData
-  | SocialPostsData;
+  | SocialPostsData
+  | ManualAnalysisData;
 
 type NodesUpdater = Node[] | ((prev: Node[]) => Node[]);
 type EdgesUpdater = Edge[] | ((prev: Edge[]) => Edge[]);
@@ -202,33 +216,12 @@ interface State {
   resetGraph: () => void;
 }
 
-// Layout: nodes flow LEFT to RIGHT, growing as a tree. The graph starts with
-// TWO root seeds the user can pick between — the PostHog video pipeline and
-// the URL → social post pipeline. Either can be deleted (Reset brings both
-// back). Other root nodes (Assets, additional URL sources) come from the
-// palette.
-const initialNodes: Node[] = [
-  {
-    id: 'source',
-    type: 'sourceNode',
-    position: { x: 60, y: 120 },
-    data: {
-      status: 'idle',
-      since: '7d',
-      sessionsCount: undefined,
-      journeys: undefined,
-    } satisfies SourceData,
-  },
-  {
-    id: 'url-source',
-    type: 'urlSourceNode',
-    position: { x: 60, y: 540 },
-    data: {
-      status: 'idle',
-      url: '',
-    } satisfies UrlSourceData,
-  },
-];
+// Layout: nodes flow LEFT to RIGHT, growing as a tree. The graph starts
+// EMPTY — a welcome card on the canvas asks the user to pick their first
+// node (Analysis = URL → posts, or Post = manual brand brief → posts).
+// The PostHog video pipeline remains accessible via the palette. Once any
+// node exists the welcome card disappears.
+const initialNodes: Node[] = [];
 
 const initialEdges: Edge[] = [];
 
