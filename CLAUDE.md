@@ -89,6 +89,20 @@ Caption burn-in uses ffmpeg's `drawtext` filter, which requires libfreetype. Hom
 
 Every scene render is keyed by `sha256` over the content-bearing fields of the beat (`kind`, `narration`, `caption`, `page`, `avatarId`, `voiceId` — `title` is excluded since it's UI-only). The hash becomes part of the output filename (`scenes-ugc-<id>-<hash>.mp4`) and the mapping is persisted to `$VIDEO_DIR/.scene-cache.json`. Cache hits short-circuit the whole render pipeline and return `{cached: true}`. **When adding new fields that affect render output, also add them to `hashBeat()` in [server/server.mjs](server/server.mjs) — otherwise the cache will return stale content.**
 
+### Social post generator (parallel root)
+
+A second flow lives on the same canvas, independent of the video pipeline:
+
+1. Drag **URL → Posts** from the palette to spawn a `urlSourceNode`.
+2. User types a website URL; clicking **Analyze URL** hits `POST /api/analyze-url`, which fetches the page (with SSRF guards in `sanitizePostUrl`, 2MB cap, html-stripped to text) and asks Claude to extract `{brand, audience, tone, summary, valueProps[], callToAction}`. Falls back to OG/meta extraction when no LLM is configured.
+3. On success the URL node spawns a `socialPostsNode` pre-seeded with the analysis (idempotent — re-analyzing the URL refreshes the existing posts node and clears stale drafts).
+4. The posts node lets the user pick **LinkedIn / Twitter / Facebook**, optionally add tone instructions, then **Generate posts** calls `POST /api/generate-posts`. The server iterates platforms (`SOCIAL_PLATFORMS` in `server/server.mjs`), asks Claude via the `submit_posts` tool for `{text, headline, hashtags}` per platform, and renders an SVG card via `renderPostCardSvg()` written to `$VIDEO_DIR/_post-<platform>-<hash>.svg` (content-addressed so re-generates dedupe).
+5. Each post card supports inline editing of headline/body, a **Refine** prompt that calls `POST /api/refine-post`, a publish/skip toggle, "Copy text", and "Download card".
+
+**Adding a new platform**: extend the `SOCIAL_PLATFORMS` map in `server/server.mjs` AND the `PLATFORM_LABEL` / `PLATFORM_ACCENT` / `PLATFORM_MAX_CHARS` / `ALL_PLATFORMS` constants in [SocialPostsNode.tsx](src/flow/nodes/SocialPostsNode.tsx). The `SocialPlatform` union in [store.ts](src/store.ts) and [api/client.ts](src/api/client.ts) must include the new key.
+
+**SVG card design**: `renderPostCardSvg()` produces a gradient background (per-platform colors), uppercase platform label, large wrapped headline (auto-sized 64–108pt based on line count via `wrapHeadline`), accent line, brand name, and value-prop subtitle. No external image dependency — SVG renders natively and downloads cleanly. If raster output is needed later, pipe through `librsvg` or `puppeteer`.
+
 ### Input sanitization boundary
 
 All endpoint inputs flow through `sanitizeBeat` / `sanitizeSince` / `sanitizeJourney` before they're spawned, fetched, or written to disk. `beat.id` must match `^[a-zA-Z0-9_-]{1,32}$` (used in filenames), `beat.page` must match `^/...` with no `..`, `avatarId`/`voiceId` must be hex. **Never bypass these helpers** — `beat.narration` flows into `heygen --text` argv and `beat.page` is consumed by Playwright in `record.mjs`. The /api/concat handler additionally asserts each input path's `dirname` equals `VIDEO_DIR`.

@@ -18,7 +18,13 @@ import {
   applyNodeChanges,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { useGraph, type AssetData, type MergeData, type SceneData } from '../store';
+import {
+  useGraph,
+  type AssetData,
+  type MergeData,
+  type SceneData,
+  type UrlSourceData,
+} from '../store';
 import { Palette, type PaletteKind } from './Palette';
 import { SourceNode } from './nodes/SourceNode';
 import { ScriptNode } from './nodes/ScriptNode';
@@ -27,6 +33,8 @@ import { OutputNode } from './nodes/OutputNode';
 import { ConcatNode } from './nodes/ConcatNode';
 import { AssetNode } from './nodes/AssetNode';
 import { MergeNode } from './nodes/MergeNode';
+import { UrlSourceNode } from './nodes/UrlSourceNode';
+import { SocialPostsNode } from './nodes/SocialPostsNode';
 
 const nodeTypes = {
   sourceNode: SourceNode,
@@ -36,6 +44,8 @@ const nodeTypes = {
   concatNode: ConcatNode,
   assetNode: AssetNode,
   mergeNode: MergeNode,
+  urlSourceNode: UrlSourceNode,
+  socialPostsNode: SocialPostsNode,
 };
 
 function GraphCanvasInner() {
@@ -222,6 +232,13 @@ function GraphCanvasInner() {
           type: 'mergeNode',
           position,
           data: { status: 'idle', mode: 'concat' } satisfies MergeData,
+        };
+      } else if (kind === 'url-source') {
+        newNode = {
+          id: `url-${idSuffix}`,
+          type: 'urlSourceNode',
+          position,
+          data: { status: 'idle', url: '' } satisfies UrlSourceData,
         };
       } else if (kind.startsWith('asset-')) {
         const assetKind = kind.slice('asset-'.length) as AssetData['kind'];

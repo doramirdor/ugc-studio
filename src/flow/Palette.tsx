@@ -4,13 +4,19 @@ import { Panel } from '@xyflow/react';
 // Drag-and-drop palette. Each item sets a `application/x-ugc-node` mime
 // in the dataTransfer; GraphCanvas's onDrop reads it back to spawn the
 // right node type at the cursor position.
-export type PaletteKind = 'asset-image' | 'asset-audio' | 'asset-video' | 'merge';
+export type PaletteKind =
+  | 'asset-image'
+  | 'asset-audio'
+  | 'asset-video'
+  | 'merge'
+  | 'url-source';
 
 const ITEMS: Array<{ kind: PaletteKind; label: string; hint: string }> = [
   { kind: 'asset-image', label: 'Image', hint: 'png · jpg · webp' },
   { kind: 'asset-audio', label: 'Audio', hint: 'mp3 · m4a · wav' },
   { kind: 'asset-video', label: 'Video', hint: 'mp4 · mov · webm' },
   { kind: 'merge', label: 'Merge', hint: 'stitch wired inputs' },
+  { kind: 'url-source', label: 'URL → Posts', hint: 'analyze + draft social' },
 ];
 
 export function Palette() {

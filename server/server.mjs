@@ -81,6 +81,79 @@ const SINCE_RE = /^\d{1,4}[smhdw]$/;
 const URL_PATH_RE = /^\/[A-Za-z0-9_\-./]{0,256}$/;
 const HEX_RE = /^[a-fA-F0-9]{1,64}$/;
 
+// Platforms supported by /api/generate-posts. Each entry pins the card
+// aspect ratio (so the SVG generator and the UI agree) plus the platform
+// constraints we surface in the Claude prompt.
+const SOCIAL_PLATFORMS = {
+  linkedin: {
+    label: 'LinkedIn',
+    width: 1200, height: 627,
+    maxChars: 1300, // platform max is 3000, but engagement-optimal is short
+    voice: 'professional, numerate, slightly skeptical of hype — no exclamation marks, no emoji spam',
+    hashtagsHint: 'optional, max 3 hashtags',
+    palette: { bg1: '#0A66C2', bg2: '#003E8A', text: '#FFFFFF', accent: '#70B5F9' },
+  },
+  twitter: {
+    label: 'Twitter / X',
+    width: 1200, height: 675,
+    maxChars: 280,
+    voice: 'punchy, opinionated, hook-first; one idea per post',
+    hashtagsHint: 'avoid hashtags unless they add reach (max 2)',
+    palette: { bg1: '#000000', bg2: '#15202B', text: '#FFFFFF', accent: '#1D9BF0' },
+  },
+  facebook: {
+    label: 'Facebook',
+    width: 1200, height: 630,
+    maxChars: 500,
+    voice: 'conversational, friendly, no jargon; explain in plain words',
+    hashtagsHint: 'avoid hashtags — they read as ads on Facebook',
+    palette: { bg1: '#1877F2', bg2: '#0B5FCC', text: '#FFFFFF', accent: '#FFFFFF' },
+  },
+};
+
+function sanitizePostUrl(raw) {
+  if (typeof raw !== 'string') throw new Error('url required');
+  const trimmed = raw.trim();
+  if (trimmed.length > 2048) throw new Error('url too long (max 2048)');
+  let u;
+  try {
+    u = new URL(trimmed);
+  } catch {
+    throw new Error('url must be a valid URL');
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    throw new Error('url must be http or https');
+  }
+  // Block private network ranges & loopback so URL fetches can't be used
+  // as an SSRF probe into the host's intranet.
+  const host = u.hostname.toLowerCase();
+  if (host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0' || host === '::1') {
+    throw new Error('url host blocked');
+  }
+  if (/^10\./.test(host) || /^192\.168\./.test(host) || /^169\.254\./.test(host)) {
+    throw new Error('url host blocked (private network)');
+  }
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) {
+    throw new Error('url host blocked (private network)');
+  }
+  return u.toString();
+}
+
+function sanitizePlatforms(raw) {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error('platforms[] required');
+  }
+  if (raw.length > 8) throw new Error('too many platforms');
+  const out = [];
+  for (const p of raw) {
+    if (typeof p !== 'string' || !SOCIAL_PLATFORMS[p]) {
+      throw new Error(`unknown platform: ${p}`);
+    }
+    if (!out.includes(p)) out.push(p);
+  }
+  return out;
+}
+
 function sanitizeBeat(raw) {
   if (!raw || typeof raw !== 'object') throw new Error('beat required');
   const id = String(raw.id ?? '');
@@ -717,6 +790,595 @@ function templateBeats(_journey) {
     { id: 'b5', kind: 'page', title: 'Closer', narration: 'One month free with code FIRST 1.', caption: 'getnadir.com', page: '/' },
   ];
 }
+
+// =========================================================================
+// Social post generator
+//
+// Flow:
+//   /api/analyze-url     -> fetch URL, ask Claude to extract brand/audience/value-props
+//   /api/generate-posts  -> turn that analysis into one post per platform (text + SVG card)
+//   /api/refine-post     -> rewrite a single post given user edit instructions
+//
+// All three Claude calls reuse the same path-detection ladder as
+// /api/script: ANTHROPIC_API_KEY → claude CLI → static template fallback.
+// =========================================================================
+const URL_FETCH_TIMEOUT_MS = 20_000;
+const URL_FETCH_MAX_BYTES = 2 * 1024 * 1024; // 2MB of HTML is plenty
+const POST_TEXT_MAX = 2000;
+const POST_HEADLINE_MAX = 120;
+const POST_INSTRUCTION_MAX = 600;
+
+async function fetchUrlAsText(url) {
+  const ctrl = AbortSignal.timeout(URL_FETCH_TIMEOUT_MS);
+  const r = await fetch(url, {
+    signal: ctrl,
+    redirect: 'follow',
+    headers: {
+      'user-agent': 'UGC-Studio/1.0 (+social post generator)',
+      'accept': 'text/html,application/xhtml+xml',
+    },
+  });
+  if (!r.ok) throw new Error(`fetch ${url}: HTTP ${r.status}`);
+  const ct = r.headers.get('content-type') || '';
+  if (!/(text\/html|application\/xhtml|text\/plain)/i.test(ct)) {
+    throw new Error(`unexpected content-type: ${ct || 'unknown'}`);
+  }
+  const ab = await r.arrayBuffer();
+  if (ab.byteLength > URL_FETCH_MAX_BYTES) {
+    throw new Error(`page too large (${ab.byteLength} bytes, max ${URL_FETCH_MAX_BYTES})`);
+  }
+  const html = Buffer.from(ab).toString('utf8');
+  return { html, finalUrl: r.url || url };
+}
+
+// Strip scripts/styles/HTML to a plain-text representation suitable for
+// Claude. We also pull out the <title> and <meta name="description">
+// separately because they're high-signal even when the body text is
+// rendered client-side (SPA shells).
+function extractTextFromHtml(html) {
+  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const descMatch = html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i)
+    || html.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i);
+  const ogTitleMatch = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i);
+  const siteNameMatch = html.match(/<meta[^>]+property=["']og:site_name["'][^>]+content=["']([^"']+)["']/i);
+
+  const stripped = html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<svg[\s\S]*?<\/svg>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 16_000); // cap roughly at 16k chars before sending to Claude
+  return {
+    title: (ogTitleMatch?.[1] || titleMatch?.[1] || '').trim().slice(0, 200),
+    description: (descMatch?.[1] || '').trim().slice(0, 400),
+    siteName: (siteNameMatch?.[1] || '').trim().slice(0, 80),
+    body: stripped,
+  };
+}
+
+const ANALYZE_SYSTEM = [
+  'You are a senior content strategist analyzing a website to brief a social-post writer.',
+  'Read the page, then output a tight JSON analysis covering brand, audience, voice, and the top value props.',
+  'Be specific and quote concrete details from the page when relevant.',
+  'No marketing fluff, no "imagine", no "revolutionary". Plain factual claims.',
+].join('\n');
+
+function buildAnalyzePrompt({ url, title, description, siteName, body }) {
+  return [
+    `URL: ${url}`,
+    siteName && `SITE: ${siteName}`,
+    title && `TITLE: ${title}`,
+    description && `META DESCRIPTION: ${description}`,
+    '',
+    'PAGE CONTENT (HTML stripped):',
+    body || '(no body text extracted)',
+  ].filter(Boolean).join('\n');
+}
+
+const ANALYZE_TOOL = {
+  name: 'submit_analysis',
+  description: 'Submit a structured analysis of the website.',
+  input_schema: {
+    type: 'object',
+    required: ['brand', 'audience', 'tone', 'summary', 'valueProps'],
+    properties: {
+      brand: { type: 'string', maxLength: 120, description: 'Brand or product name as it appears on the page.' },
+      audience: { type: 'string', maxLength: 240, description: 'Who this is for, one sentence.' },
+      tone: { type: 'string', maxLength: 200, description: 'Voice + register cues (formal, technical, playful, etc.).' },
+      summary: { type: 'string', maxLength: 480, description: 'One-paragraph summary of what the product does.' },
+      valueProps: {
+        type: 'array',
+        minItems: 1,
+        maxItems: 6,
+        items: { type: 'string', maxLength: 200 },
+        description: 'The strongest claims / value props, ordered most-to-least impactful.',
+      },
+      callToAction: { type: 'string', maxLength: 120 },
+    },
+  },
+};
+
+async function callClaudeJson({ system, userMsg, tool, toolName, cliFallback }) {
+  if (process.env.ANTHROPIC_API_KEY) {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: ANTHROPIC_MODEL,
+        max_tokens: 2048,
+        system,
+        tools: [tool],
+        tool_choice: { type: 'tool', name: toolName },
+        messages: [{ role: 'user', content: userMsg }],
+      }),
+      signal: AbortSignal.timeout(45_000),
+    });
+    if (!r.ok) throw new Error(`anthropic ${r.status}: ${await r.text()}`);
+    const json = await r.json();
+    const toolUse = (json.content || []).find((b) => b.type === 'tool_use');
+    if (!toolUse?.input) throw new Error('claude returned no tool call');
+    return { result: toolUse.input, mode: 'llm-api', model: ANTHROPIC_MODEL };
+  }
+  if (USE_CLAUDE_CLI && claudeCliAvailable) {
+    const prompt = cliFallback(userMsg);
+    const { stdout } = await runWithStdin(
+      'claude',
+      ['-p', '--output-format', 'text', '--max-turns', '1', '--disallowedTools', '*'],
+      prompt,
+      { cwd: os.tmpdir() },
+    );
+    const cleaned = stdout.replace(/^```(?:json)?\s*/m, '').replace(/```\s*$/m, '').trim();
+    const match = cleaned.match(/\{[\s\S]*\}\s*$/m) || cleaned.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error(`claude CLI returned no JSON: ${stdout.slice(0, 400)}`);
+    return { result: JSON.parse(match[0]), mode: 'llm-cli', model: 'claude-code-subscription' };
+  }
+  throw new Error('no LLM configured: set ANTHROPIC_API_KEY or install the claude CLI');
+}
+
+app.post('/api/analyze-url', async (req, res) => {
+  let url;
+  try {
+    url = sanitizePostUrl(req.body?.url);
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+  try {
+    const { html, finalUrl } = await fetchUrlAsText(url);
+    const extracted = extractTextFromHtml(html);
+    if (!process.env.ANTHROPIC_API_KEY && !(USE_CLAUDE_CLI && claudeCliAvailable)) {
+      // Template fallback: synthesize a minimal analysis from the meta
+      // tags we already extracted so the rest of the pipeline keeps working.
+      return res.json({
+        url: finalUrl,
+        analysis: {
+          brand: extracted.siteName || extracted.title.split(/[—\-|·]/)[0].trim() || 'Brand',
+          audience: 'general audience',
+          tone: 'neutral, informative',
+          summary: extracted.description || extracted.title || 'No description available.',
+          valueProps: extracted.description ? [extracted.description] : [extracted.title || 'Visit the site to learn more.'],
+          callToAction: 'Learn more',
+        },
+        mode: 'template',
+      });
+    }
+    const { result, mode, model } = await callClaudeJson({
+      system: ANALYZE_SYSTEM,
+      userMsg: buildAnalyzePrompt({ url: finalUrl, ...extracted }),
+      tool: ANALYZE_TOOL,
+      toolName: 'submit_analysis',
+      cliFallback: (msg) => [
+        ANALYZE_SYSTEM,
+        '',
+        msg,
+        '',
+        'Output ONLY a single JSON object, no prose, no markdown fences. Exact shape:',
+        '{"brand":"...","audience":"...","tone":"...","summary":"...","valueProps":["...","..."],"callToAction":"..."}',
+      ].join('\n'),
+    });
+    res.json({ url: finalUrl, analysis: result, mode, model });
+  } catch (e) {
+    console.error('[analyze-url] error:', e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+// SVG card generator. We keep it pure-JS (no dependency on rsvg/canvas)
+// because SVG renders directly in the browser and downloads fine as .svg.
+// Files are content-addressed by sha256(headline + brand + platform) so
+// re-renders dedupe.
+function escapeXml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+// Wrap headline text into <=N lines of <=cols chars without breaking
+// words mid-letter. Returns at most maxLines lines; the last is suffixed
+// with an ellipsis if there's overflow.
+function wrapHeadline(text, cols, maxLines) {
+  const words = String(text || '').split(/\s+/).filter(Boolean);
+  const lines = [];
+  let cur = '';
+  for (const w of words) {
+    const next = cur ? `${cur} ${w}` : w;
+    if (next.length <= cols) {
+      cur = next;
+    } else {
+      if (cur) lines.push(cur);
+      cur = w;
+      if (lines.length === maxLines) break;
+    }
+  }
+  if (cur && lines.length < maxLines) lines.push(cur);
+  if (words.length && lines.length === maxLines) {
+    // Mark visual overflow.
+    const last = lines[lines.length - 1];
+    if (last.length > cols - 1) {
+      lines[lines.length - 1] = last.slice(0, cols - 1).trimEnd() + '…';
+    } else {
+      lines[lines.length - 1] = last + '…';
+    }
+  }
+  return lines;
+}
+
+function renderPostCardSvg({ platform, headline, brand, valueProp }) {
+  const spec = SOCIAL_PLATFORMS[platform];
+  if (!spec) throw new Error(`unknown platform: ${platform}`);
+  const { width, height, palette } = spec;
+
+  // Headline sizing tuned per platform aspect / card area. We pick the
+  // tightest reasonable column width that still keeps the text readable
+  // at the card's native size.
+  const isSquareish = Math.abs(width / height - 1) < 0.1;
+  const cols = isSquareish ? 16 : 18;
+  const maxLines = 4;
+  const headLines = wrapHeadline(headline || '', cols, maxLines);
+  const fontSize = headLines.length >= 4 ? 64 : headLines.length === 3 ? 76 : headLines.length === 2 ? 92 : 108;
+  const lineHeight = fontSize * 1.12;
+  const blockHeight = headLines.length * lineHeight;
+  const headlineStartY = (height - blockHeight) / 2 + fontSize * 0.85;
+
+  const brandLabel = (brand || '').slice(0, 40);
+  const valuePropLabel = (valueProp || '').slice(0, 70);
+
+  const tspans = headLines
+    .map((line, i) => `<tspan x="80" dy="${i === 0 ? 0 : lineHeight}">${escapeXml(line)}</tspan>`)
+    .join('');
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img" aria-label="${escapeXml(headline || '')}">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="${palette.bg1}"/>
+      <stop offset="100%" stop-color="${palette.bg2}"/>
+    </linearGradient>
+  </defs>
+  <rect width="${width}" height="${height}" fill="url(#bg)"/>
+  <rect x="80" y="${height - 132}" width="60" height="4" fill="${palette.accent}" opacity="0.95"/>
+  <text x="80" y="116" font-family="-apple-system, system-ui, 'Segoe UI', Inter, Roboto, Helvetica, Arial, sans-serif" font-size="24" font-weight="600" letter-spacing="2" fill="${palette.text}" opacity="0.78">${escapeXml(spec.label.toUpperCase())}</text>
+  <text font-family="-apple-system, system-ui, 'Segoe UI', Inter, Roboto, Helvetica, Arial, sans-serif" font-size="${fontSize}" font-weight="800" fill="${palette.text}" letter-spacing="-1.5" y="${headlineStartY}">${tspans}</text>
+  <text x="80" y="${height - 80}" font-family="-apple-system, system-ui, 'Segoe UI', Inter, Roboto, Helvetica, Arial, sans-serif" font-size="26" font-weight="600" fill="${palette.text}" opacity="0.95">${escapeXml(brandLabel)}</text>
+  <text x="80" y="${height - 48}" font-family="-apple-system, system-ui, 'Segoe UI', Inter, Roboto, Helvetica, Arial, sans-serif" font-size="20" font-weight="400" fill="${palette.text}" opacity="0.70">${escapeXml(valuePropLabel)}</text>
+</svg>
+`;
+}
+
+async function writePostCardSvg({ platform, headline, brand, valueProp }) {
+  const hash = crypto
+    .createHash('sha256')
+    .update(JSON.stringify({ platform, headline, brand, valueProp }))
+    .digest('hex')
+    .slice(0, 16);
+  const filename = `_post-${platform}-${hash}.svg`;
+  const out = path.join(VIDEO_DIR, filename);
+  await mkdir(VIDEO_DIR, { recursive: true });
+  if (!existsSync(out)) {
+    await writeFile(out, renderPostCardSvg({ platform, headline, brand, valueProp }), 'utf8');
+  }
+  return `/videos/${filename}`;
+}
+
+const POSTS_TOOL = {
+  name: 'submit_posts',
+  description: 'Submit the per-platform social posts.',
+  input_schema: {
+    type: 'object',
+    required: ['posts'],
+    properties: {
+      posts: {
+        type: 'array',
+        minItems: 1,
+        maxItems: 8,
+        items: {
+          type: 'object',
+          required: ['platform', 'text', 'headline'],
+          properties: {
+            platform: { type: 'string', enum: Object.keys(SOCIAL_PLATFORMS) },
+            text: { type: 'string', maxLength: 1500, description: 'The post body that gets pasted into the platform composer.' },
+            headline: { type: 'string', maxLength: 120, description: 'Short headline used on the image card. 2-8 words.' },
+            hashtags: {
+              type: 'array',
+              maxItems: 5,
+              items: { type: 'string', maxLength: 40 },
+            },
+          },
+        },
+      },
+    },
+  },
+};
+
+const POSTS_SYSTEM = [
+  'You are a senior social-media writer. Given a brand analysis, draft ONE post per requested platform.',
+  'Each post must respect that platform\'s character limit, voice, and hashtag norm.',
+  'Make every post stand on its own — no "as we said above", no cross-post references.',
+  'Lead with a concrete hook. No filler. No "imagine", no "revolutionary", no "supercharge", no clickbait.',
+  'The headline field is what appears on the image card (2-8 words). It should be a punchy version of the post idea, not a copy of the body.',
+  'Output via the submit_posts tool only.',
+].join('\n');
+
+function buildPostsPrompt({ analysis, platforms, url, extraInstructions }) {
+  const constraints = platforms.map((p) => {
+    const s = SOCIAL_PLATFORMS[p];
+    return [
+      `${s.label} (platform key: "${p}")`,
+      `  - max ${s.maxChars} characters in body`,
+      `  - voice: ${s.voice}`,
+      `  - hashtags: ${s.hashtagsHint}`,
+    ].join('\n');
+  }).join('\n');
+
+  return [
+    `Source URL: ${url}`,
+    '',
+    'BRAND ANALYSIS:',
+    JSON.stringify(analysis, null, 2),
+    '',
+    'PLATFORMS + CONSTRAINTS:',
+    constraints,
+    '',
+    extraInstructions ? `Additional user instructions: ${extraInstructions}` : '',
+    '',
+    'Draft one post per platform in the order listed above.',
+  ].filter(Boolean).join('\n');
+}
+
+function sanitizeAnalysis(raw) {
+  if (!raw || typeof raw !== 'object') throw new Error('analysis required');
+  const clean = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
+  const brand = clean(raw.brand, 120);
+  if (!brand) throw new Error('analysis.brand required');
+  return {
+    brand,
+    audience: clean(raw.audience, 240),
+    tone: clean(raw.tone, 200),
+    summary: clean(raw.summary, 480),
+    valueProps: Array.isArray(raw.valueProps)
+      ? raw.valueProps.filter((v) => typeof v === 'string').slice(0, 8).map((v) => v.slice(0, 200))
+      : [],
+    callToAction: clean(raw.callToAction, 120),
+  };
+}
+
+function sanitizePost(raw, fallbackPlatform) {
+  if (!raw || typeof raw !== 'object') throw new Error('post required');
+  const platform = SOCIAL_PLATFORMS[raw.platform] ? raw.platform : (fallbackPlatform || null);
+  if (!platform) throw new Error('post.platform invalid');
+  const text = typeof raw.text === 'string' ? raw.text.slice(0, POST_TEXT_MAX) : '';
+  const headline = typeof raw.headline === 'string' ? raw.headline.slice(0, POST_HEADLINE_MAX) : '';
+  const hashtags = Array.isArray(raw.hashtags)
+    ? raw.hashtags
+        .filter((h) => typeof h === 'string')
+        .slice(0, 5)
+        .map((h) => h.replace(/^#?/, '').slice(0, 40))
+        .filter(Boolean)
+    : [];
+  return { platform, text, headline, hashtags };
+}
+
+app.post('/api/generate-posts', async (req, res) => {
+  let url;
+  let analysis;
+  let platforms;
+  let extraInstructions = '';
+  try {
+    url = sanitizePostUrl(req.body?.url);
+    analysis = sanitizeAnalysis(req.body?.analysis);
+    platforms = sanitizePlatforms(req.body?.platforms);
+    if (req.body?.extraInstructions) {
+      extraInstructions = String(req.body.extraInstructions).slice(0, POST_INSTRUCTION_MAX);
+    }
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+
+  try {
+    let drafts;
+    let mode = 'template';
+    let model;
+    if (process.env.ANTHROPIC_API_KEY || (USE_CLAUDE_CLI && claudeCliAvailable)) {
+      const out = await callClaudeJson({
+        system: POSTS_SYSTEM,
+        userMsg: buildPostsPrompt({ analysis, platforms, url, extraInstructions }),
+        tool: POSTS_TOOL,
+        toolName: 'submit_posts',
+        cliFallback: (msg) => [
+          POSTS_SYSTEM,
+          '',
+          msg,
+          '',
+          'Output ONLY one JSON object, no prose, no markdown. Shape:',
+          '{"posts":[{"platform":"linkedin|twitter|facebook","text":"...","headline":"...","hashtags":["..."]}]}',
+        ].join('\n'),
+      });
+      drafts = Array.isArray(out.result?.posts) ? out.result.posts : [];
+      mode = out.mode;
+      model = out.model;
+    } else {
+      drafts = platforms.map((p) => templatePost(p, analysis));
+    }
+
+    // Make sure we have one post per requested platform; pad with template
+    // fallbacks if Claude skipped any (cheap insurance).
+    const byPlatform = new Map();
+    for (const d of drafts) {
+      const s = sanitizePost(d);
+      if (platforms.includes(s.platform) && !byPlatform.has(s.platform)) {
+        byPlatform.set(s.platform, s);
+      }
+    }
+    for (const p of platforms) {
+      if (!byPlatform.has(p)) byPlatform.set(p, sanitizePost(templatePost(p, analysis), p));
+    }
+
+    const posts = [];
+    const valueProp = analysis.valueProps?.[0] || analysis.summary || '';
+    let idx = 0;
+    for (const p of platforms) {
+      const draft = byPlatform.get(p);
+      const imageUrl = await writePostCardSvg({
+        platform: p,
+        headline: draft.headline || draft.text.split(/[.\n]/)[0].slice(0, 60),
+        brand: analysis.brand,
+        valueProp,
+      });
+      posts.push({
+        id: `${p}-${Date.now().toString(36)}-${idx++}`,
+        platform: p,
+        text: draft.text,
+        headline: draft.headline,
+        hashtags: draft.hashtags,
+        imageUrl,
+      });
+    }
+    res.json({ posts, mode, model, analysis });
+  } catch (e) {
+    console.error('[generate-posts] error:', e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+function templatePost(platform, analysis) {
+  const headline = (analysis.valueProps?.[0] || analysis.summary || analysis.brand || '').split(/[.\n]/)[0].trim().slice(0, 80) || analysis.brand;
+  const cta = analysis.callToAction || 'Learn more';
+  const longBody = [
+    analysis.valueProps?.[0] || analysis.summary,
+    analysis.valueProps?.[1] && `— ${analysis.valueProps[1]}`,
+    `${cta}.`,
+  ].filter(Boolean).join('\n\n');
+  if (platform === 'twitter') {
+    return {
+      platform,
+      headline,
+      text: `${headline}.\n\n${analysis.valueProps?.[0] || ''}\n\n${cta}.`.slice(0, 270),
+      hashtags: [],
+    };
+  }
+  if (platform === 'facebook') {
+    return { platform, headline, text: longBody.slice(0, 480), hashtags: [] };
+  }
+  return { platform, headline, text: longBody.slice(0, 1200), hashtags: [] };
+}
+
+app.post('/api/refine-post', async (req, res) => {
+  let analysis;
+  let post;
+  let instructions;
+  try {
+    analysis = sanitizeAnalysis(req.body?.analysis);
+    post = sanitizePost(req.body?.post);
+    instructions = typeof req.body?.instructions === 'string'
+      ? req.body.instructions.slice(0, POST_INSTRUCTION_MAX).trim()
+      : '';
+    if (!instructions) throw new Error('instructions required');
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+
+  try {
+    const spec = SOCIAL_PLATFORMS[post.platform];
+    const userMsg = [
+      'Rewrite the post below following the user instructions, keeping the same platform constraints.',
+      '',
+      `Platform: ${spec.label} (max ${spec.maxChars} chars; voice: ${spec.voice})`,
+      '',
+      'CURRENT POST:',
+      JSON.stringify({ text: post.text, headline: post.headline, hashtags: post.hashtags }, null, 2),
+      '',
+      'BRAND ANALYSIS:',
+      JSON.stringify(analysis, null, 2),
+      '',
+      `USER INSTRUCTIONS: ${instructions}`,
+    ].join('\n');
+
+    let updated;
+    let mode = 'template';
+    let model;
+    if (process.env.ANTHROPIC_API_KEY || (USE_CLAUDE_CLI && claudeCliAvailable)) {
+      const out = await callClaudeJson({
+        system: POSTS_SYSTEM,
+        userMsg,
+        tool: POSTS_TOOL,
+        toolName: 'submit_posts',
+        cliFallback: (msg) => [
+          POSTS_SYSTEM,
+          '',
+          msg,
+          '',
+          'Output ONLY one JSON object, shape: {"posts":[{"platform":"...","text":"...","headline":"...","hashtags":["..."]}]}',
+        ].join('\n'),
+      });
+      const drafts = Array.isArray(out.result?.posts) ? out.result.posts : [];
+      updated = sanitizePost(drafts[0] || {}, post.platform);
+      mode = out.mode;
+      model = out.model;
+    } else {
+      // No LLM: at least echo the instructions as appended copy so the
+      // user sees something change.
+      updated = {
+        platform: post.platform,
+        text: `${post.text}\n\n(note: ${instructions.slice(0, 200)})`.slice(0, POST_TEXT_MAX),
+        headline: post.headline,
+        hashtags: post.hashtags,
+      };
+    }
+
+    const valueProp = analysis.valueProps?.[0] || analysis.summary || '';
+    const imageUrl = await writePostCardSvg({
+      platform: updated.platform,
+      headline: updated.headline || updated.text.split(/[.\n]/)[0].slice(0, 60),
+      brand: analysis.brand,
+      valueProp,
+    });
+
+    res.json({
+      post: { ...updated, id: post.id || `${updated.platform}-${Date.now().toString(36)}`, imageUrl },
+      mode,
+      model,
+    });
+  } catch (e) {
+    console.error('[refine-post] error:', e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
 
 // =========================================================================
 // /api/render-scene - render a single scene
